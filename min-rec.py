@@ -4,8 +4,10 @@
 import os
 import sys
 import argparse
+import dis
 
 from rec.preprocessor import Preprocessor
+from rec.recompiler import Recompiler
 
 if __name__ == '__main__':
     std_path = os.path.dirname(os.path.realpath(__file__)) + "/std/"
@@ -27,9 +29,18 @@ if __name__ == '__main__':
                 print("Warn : Include path \"{}\" does not seem to exist".format(imp_path))
 
     prepro = Preprocessor(include_paths)
+    recomp = Recompiler()
     
     try:
         final_source = prepro.processFile(args.input_path)
     except Exception as e:
-        print(e)
+        print("Preprocessor Error : {}".format(e))
         sys.exit(0)
+
+    try:
+        res = recomp.compileString(final_source)
+    except Exception as e:
+        print("Recompiler Error : {}".format(e))
+        sys.exit(0)
+
+    print(res)
