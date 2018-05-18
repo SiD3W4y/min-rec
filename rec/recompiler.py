@@ -10,14 +10,6 @@ def _makeslot(args):
 def _syscall(args):
     pass
 
-def processConsts(cst):
-    if cst is None:
-        return 0
-    elif isinstance(cst, str) and len(cst) == 1:
-        return ord(c)
-    else:
-        return cst
-
 REGS = ["$A", "$B", "$C", "$D", "$E", "$F"]
 
 class Recompiler:
@@ -84,30 +76,12 @@ class Recompiler:
                 self.compileBytecode(code)
             if ins.opname == "CALL_FUNCTION":
                 arg_count = ins.argval
-                args = []
 
                 if arg_count >= len(REGS)-1:
                     raise Exception("Functions must have at most {} arguments".format(len(REGS)-1))
                 
-                for i in range(arg_count):
-                    args.append(env.popEvent())
-                
-                args = args[::-1]
-
-                for i, v in enumerate(args):
-                    if v.type == StackEvent.LOAD_CONST:
-                        print(v.index)
-                        print(env.getConsts())
-                        cstval = env.getConsts()[v.index]
-
-                        if cstval.type == ConstVal.Addr:
-                            self.emitter.emitMovRef(REGS[i], env.getStringRef(i))
-                        if cstval.type == ConstVal.Imm:
-                            self.emitter.emitMovImm(REGS[i], cstval.value)
-                    if v.type == StackEvent.LOAD_FAST:
-                        self.emitter.emitLoadSlot(REGS[i], v.index)
-
                 # TODO: Emit movs of variables into regs
+                env.setupArgs(arg_count, self.emitter)
 
                 func = env.popEvent().value
                 self.emitter.emitRaw("call #{}".format(func))
@@ -126,6 +100,16 @@ class Recompiler:
                 # We returned from a function
                 if evt.type == StackEvent.MAKE_FUNCTION_DUMMY:
                     self.emitter.emitStoreSlot(REGS[0], evt.index)
+                if evt.type == StackEvent.LOAD_CONST:
+                    cstval = env.getConsts()[evt.index]
+
+                    if cstval.type == ConstVal.Imm:
+                        self.emitter.emitMovImm(REGS[0], cstval.value)
+                    if cstval.type == ConstVal.Addr:
+                        self.emitter.emitMovRef(REGS[0], cstval.value)
+
+                    self.emitter.emitStoreSlot(REGS[0], ins.arg)
+
             if ins.opname == "RETURN_VALUE":
                 evt = env.popEvent()
 
@@ -138,6 +122,67 @@ class Recompiler:
                         self.emitter.emitMovImm(REGS[0], cstval.value)
                     if cstval.type == ConstVal.Addr:
                         self.emitter.emitMovAddr(REGS[0], env.getStringRef(evt.index))
+
+            if ins.opname.startswith("BINARY") or ins.opname.startswith("INPLACE"):
+                env.setupArgs(2, self.emitter)
+
+                if ins.opname == "BINARY_ADD" or ins.opname == "INPLACE_ADD":
+                    self.emitter.emitRaw("add $A $B")
+                if ins.opname == "BINARY_MULTIPLY" or ins.opname == "INPLACE_MULTIPLY":
+                    self.emitter.emitRaw("mul $A $B")
+                if ins.opname == "BINARY_SUBSTRACT" or ins.opname == "INPLACE_SUBSTRACT":
+                    self.emitter.emitRaw("sub $A $B")
+                if ins.opname == "BINARY_LSHIFT":
+                    self.emitter.emitRaw("shl $A $B")
+                if ins.opname == "BINARY_RSHIFT":
+                    self.emitter.emitRaw("shr $A $B")
+                if ins.opname == "BINARY_AND":
+                    self.emitter.emitRaw("and $A $B")
+                if ins.opname == "BINARY_XOR":
+                    self.emitter.emitRaw("xor $A $B")
+                if ins.opname == "BINARY_OR":
+                    self.emitter.emitRaw("or $A $B")
+
+                env.pushEvent(StackEvent(StackEvent.MAKE_FUNCTION_DUMMY, 0, 0))
+            if ins.opname == "SETUP_LOOP":
+                self.emitter.emitLabel(env.addLoop())
+            if ins.opname == "JUMP_ABSOLUTE":
+                self.emitter.emitRaw("jmp #{}".format(env.getLoopTop()))
+            if ins.opname == "POP_BLOCK":
+                self.emitter.emitRaw(env.popLoop())
+
+            if ins.opname == "COMPARE_OP":
+                env.setupArgs(2, self.emitter)
+                env.addComparison(ins.argval)
+                self.emitter.emitRaw("cmp $A $B")
+                env.pushEvent(StackEvent(StackEvent.MAKE_FUNCTION_DUMMY, 0, 0))
+            
+            if ins.opname == "POP_JUMP_IF_TRUE":
+                cmp = env.popComparison()
+                dest = env.getLoopTop() + "_end"
+
+                if cmp == '>':
+                    self.emitter.emitRaw("jbe #{}".format(dest))
+                if cmp == '<':
+                    self.emitter.emitRaw("jle #{}".format(dest))
+                if cmp == "==":
+                    self.emitter.emitRaw("je #{}".format(dest))
+                if cmp == "!=":
+                    self.emitter.emitRaw("jne #{}".format(dest))
+
+            if ins.opname == "POP_JUMP_IF_FALSE":
+                cmp = env.popComparison()
+                dest = env.getLoopTop() + "_end"
+
+                if cmp == '>':
+                    self.emitter.emitRaw("jle #{}".format(dest))
+                if cmp == '<':
+                    self.emitter.emitRaw("jbe #{}".format(dest))
+                if cmp == "==":
+                    self.emitter.emitRaw("jne #{}".format(dest))
+                if cmp == "!=":
+                    self.emitter.emitRaw("je #{}".format(dest))
+
 
         if level_name != "<module>":
             self.emitter.emitEpilogue()

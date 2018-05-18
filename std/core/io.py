@@ -1,5 +1,10 @@
-def read(fd, addr, len):
-    __syscall(SYS_READ, fd, addr, len)
+# io module : Mostly wrapping around syscalls for now
 
 def write(fd, addr, len):
-    __syscall(SYS_WRITE, fd, addr, len)
+    __syscall__(0, fd, addr, len)
+
+def read(fd, addr, len):
+    __syscall__(1, fd, addr, len)
+
+def exit(code):
+    __syscall__(2, code, 0, 0)
