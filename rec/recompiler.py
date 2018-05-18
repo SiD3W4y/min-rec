@@ -1,6 +1,7 @@
 import dis
 
 from rec.emitter import Emitter
+from rec.env import Env, StackEvent, ConstVal
 import rec.utils as utils
 
 def _makeslot(args):
@@ -18,28 +19,6 @@ def processConsts(cst):
         return cst
 
 REGS = ["$A", "$B", "$C", "$D", "$E", "$F"]
-
-class ConstType:
-    Addr = 0
-    Imm = 1
-
-class StackEvent:
-    LOAD_FAST = 0
-    LOAD_CONST = 1
-    LOAD_GLOBAL = 2
-    MAKE_FUNCTION_DUMMY = 3 # push a dummy return value on the stack
-
-    def __init__(self, evt_type, evt_val):
-        self.evt_type = evt_type
-        self.evt_val = evt_val
-
-    @property
-    def value(self):
-        return self.evt_val
-
-    @property
-    def type(self):
-        return self.evt_type
 
 class Recompiler:
     def __init__(self):
@@ -75,26 +54,29 @@ class Recompiler:
         dis.dis(code)
         
         level_name = code.co_name
-        consts = list(map(processConsts, code.co_consts))
         
-        events = []
+        env = Env(code)
 
         # if we are not at the toplevel we setup the function prologue
         if level_name != "<module>":
-            self.emitter.emitLabel(level_name)
-
-            # TODO: Emit function constants
-            self.emitter.emitRaw("push $BP")
-            self.emitter.emitRaw("mov $BP, $SP")
-            self.emitter.emitRaw("sub $SP, {}".format(code.co_nlocals * 4))
-
-            # TODO: Copy arguments into local slots
+            csts = env.getConsts()
             
+            # Emit const strings before function definition
+            for i, v in enumerate(csts):
+                if v.type == ConstVal.Addr:
+                    self.emitter.emitString(env.getStringRef(i), v.value)
+
+            self.emitter.emitLabel(level_name)
+            self.emitter.emitPrologue(code.co_nlocals)
+            
+            # Copy args into slot
+            for i in range(code.co_argcount):
+                self.emitter.emitStoreSlot(REGS[i], i)
 
         for ins in btc:
             if ins.opname == "MAKE_FUNCTION":
-                name = events.pop().value
-                code = events.pop().value
+                name = env.popEvent().value
+                code = env.popEvent().value
 
                 if not isinstance(code, type(self.compileBytecode.__code__)):
                     raise Exception("MAKE_FUNCTION instruction with no code object")
@@ -104,26 +86,58 @@ class Recompiler:
                 arg_count = ins.argval
                 args = []
 
-                if arg_count >= len(REGS):
-                    raise Exception("Functions must have at most {} arguments".format(len(REGS)))
+                if arg_count >= len(REGS)-1:
+                    raise Exception("Functions must have at most {} arguments".format(len(REGS)-1))
                 
                 for i in range(arg_count):
-                    args.append(events.pop())
+                    args.append(env.popEvent())
                 
+                args = args[::-1]
+
+                for i, v in enumerate(args):
+                    if v.type == StackEvent.LOAD_CONST:
+                        print(v.index)
+                        print(env.getConsts())
+                        cstval = env.getConsts()[v.index]
+
+                        if cstval.type == ConstVal.Addr:
+                            self.emitter.emitMovRef(REGS[i], env.getStringRef(i))
+                        if cstval.type == ConstVal.Imm:
+                            self.emitter.emitMovImm(REGS[i], cstval.value)
+                    if v.type == StackEvent.LOAD_FAST:
+                        self.emitter.emitLoadSlot(REGS[i], v.index)
+
                 # TODO: Emit movs of variables into regs
-                func = events.pop().value
+
+                func = env.popEvent().value
                 self.emitter.emitRaw("call #{}".format(func))
                 
-                events.append(StackEvent(StackEvent.MAKE_FUNCTION_DUMMY, 0))
+                env.pushEvent(StackEvent(StackEvent.MAKE_FUNCTION_DUMMY, 0, 0))
 
             if ins.opname == "LOAD_FAST":
-                events.append(StackEvent(StackEvent.LOAD_FAST, ins.argval))
+                env.pushEvent(StackEvent(StackEvent.LOAD_FAST, ins.argval, ins.arg))
             if ins.opname == "LOAD_CONST":
-                events.append(StackEvent(StackEvent.LOAD_CONST, ins.argval))
+                env.pushEvent(StackEvent(StackEvent.LOAD_CONST, ins.argval, ins.arg))
             if ins.opname == "LOAD_GLOBAL":
-                events.append(StackEvent(StackEvent.LOAD_GLOBAL, ins.argval))
+                env.pushEvent(StackEvent(StackEvent.LOAD_GLOBAL, ins.argval, ins.arg))
+            if ins.opname == "STORE_FAST":
+                evt = env.popEvent()
+                
+                # We returned from a function
+                if evt.type == StackEvent.MAKE_FUNCTION_DUMMY:
+                    self.emitter.emitStoreSlot(REGS[0], evt.index)
+            if ins.opname == "RETURN_VALUE":
+                evt = env.popEvent()
+
+                if evt.type == StackEvent.LOAD_FAST:
+                    self.emitter.emitLoadSlot(REGS[0], evt.index)
+                if evt.type == StackEvent.LOAD_CONST:
+                    cstval = env.getConsts()[evt.index]
+
+                    if cstval.type == ConstVal.Imm:
+                        self.emitter.emitMovImm(REGS[0], cstval.value)
+                    if cstval.type == ConstVal.Addr:
+                        self.emitter.emitMovAddr(REGS[0], env.getStringRef(evt.index))
 
         if level_name != "<module>":
-            self.emitter.emitRaw("mov $SP, $BP")
-            self.emitter.emitRaw("pop $BP")
-            self.emitter.emitRaw("ret\n")
+            self.emitter.emitEpilogue()
